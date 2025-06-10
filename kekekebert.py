@@ -9,7 +9,7 @@ strategies (mean, max, weighted mean, etc.).
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from sentence_transformers.util import cos_sim
 
 import numpy as np
@@ -27,12 +27,15 @@ class TokenEmbeddingsResult:
     Attributes:
         token_embeddings: Embeddings for each SBERT token as numpy array of shape (n_tokens, embedding_dim)
         word_to_tokens_mapping: Dictionary mapping spaCy spans to lists of SBERT token indices
+        token_to_sentence_mapping: Dictionary mapping SBERT token indices to spaCy sentence indices
         text_embedding: Full text embedding as numpy array of shape (embedding_dim,)
     """
 
     token_embeddings: np.ndarray
     word_to_tokens_mapping: Dict[Span, List[int]]
+    token_to_sentence_mapping: Dict[int, int]
     text_embedding: np.ndarray
+    tokens: List[int]
 
 
 def pool_embeddings(
@@ -183,7 +186,8 @@ def get_word_embeddings(
 
 
 def extract_token_embeddings(
-    doc: Doc, model_name: str = "all-MiniLM-L6-v2"
+    doc: Doc,
+    model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
 ) -> TokenEmbeddingsResult:
     """Extract token-level embeddings from a spaCy document using SBERT.
 
@@ -260,15 +264,24 @@ def extract_token_embeddings(
         doc, encoded["offset_mapping"].squeeze(0).tolist(), tokenizer
     )
 
+    # Create mapping between SBERT tokens and sentences
+    token_to_sentence_mapping = _create_token_to_sentence_mapping(
+        doc, encoded["offset_mapping"].squeeze(0).tolist()
+    )
+
     logger.info(
         f"Extracted embeddings using official API: {token_embeddings.shape[0]} tokens, "
         f"embedding dimension: {token_embeddings.shape[1]}"
     )
 
+    print(encoded["input_ids"].squeeze(0).tolist())
+
     return TokenEmbeddingsResult(
         token_embeddings=token_embeddings,
         word_to_tokens_mapping=word_to_tokens_mapping,
+        token_to_sentence_mapping=token_to_sentence_mapping,
         text_embedding=text_embedding,
+        tokens=encoded["input_ids"].squeeze(0).tolist()
     )
 
 
@@ -323,7 +336,371 @@ def _create_word_to_tokens_mapping(
                 f"No SBERT token alignment found for spaCy token: '{token.text}'"
             )
 
+    logger.debug(f"Created word-to-tokens mapping for {len(word_to_tokens)} words")
     return word_to_tokens
+
+
+def _create_token_to_sentence_mapping(
+    doc: Doc, offset_mapping: List[Tuple[int, int]]
+) -> Dict[int, int]:
+    """Create mapping between SBERT token indices and spaCy sentence indices.
+
+    This function maps each SBERT token to the sentence it belongs to,
+    using character offset information to determine sentence boundaries.
+
+    Args:
+        doc: spaCy document with sentence segmentation
+        offset_mapping: Character offset mapping from SBERT tokenizer
+
+    Returns:
+        Dictionary mapping SBERT token indices to spaCy sentence indices
+    """
+    token_to_sentence = {}
+
+    # Create sentence boundaries based on character positions
+    sentence_boundaries = []
+    for sent_idx, sent in enumerate(doc.sents):
+        start_char = sent.start_char
+        end_char = sent.end_char
+        sentence_boundaries.append((sent_idx, start_char, end_char))
+
+    # Map each SBERT token to its sentence
+    for token_idx, (start_char, end_char) in enumerate(offset_mapping):
+        # Skip special tokens and padding (they have offset (0, 0))
+        if start_char == 0 and end_char == 0:
+            continue
+
+        # Find which sentence this token belongs to
+        token_center = (start_char + end_char) / 2
+
+        for sent_idx, sent_start, sent_end in sentence_boundaries:
+            if sent_start <= token_center < sent_end:
+                token_to_sentence[token_idx] = sent_idx
+                break
+        else:
+            # If no sentence found, assign to the last sentence
+            if sentence_boundaries:
+                token_to_sentence[token_idx] = sentence_boundaries[-1][0]
+
+    return token_to_sentence
+
+
+def render_tokens_html(
+    token_scores: List[Union[Dict[str, Union[str, float]], Tuple[str, float]]],
+    title: str = "Token Visualization",
+    colormap: str = "red",
+    show_scores: bool = True,
+    dialect: str = "mpnet",
+) -> str:
+    """Render tokenized text as HTML with color-coded heatmap based on scores.
+
+    Creates an HTML visualization where each token is color-coded according to its score,
+    with higher scores showing more intense colors. Tokens belonging to the same word
+    are grouped closer together, and subword tokens (##) are displayed without the prefix.
+
+    Args:
+        token_scores: List of token/score pairs. Each item can be:
+            - Dict with 'token' and 'score' keys: {'token': 'hello', 'score': 0.8}
+            - Tuple: ('hello', 0.8)
+        title: HTML page title
+        colormap: Color scheme to use. Options: 'red', 'blue', 'green', 'purple', 'orange'
+        show_scores: Whether to show numeric scores as tooltips
+        dialect: Dialect of the model used for tokenization (default is 'mpnet',
+            'minilm' is also supported)
+
+    Returns:
+        Complete HTML string with embedded CSS styling
+
+    Raises:
+        ValueError: If token_scores is empty or contains invalid format
+
+    Examples:
+        >>> tokens = [('Hello', 0.8), ('##world', 0.3), ('!', 0.1)]
+        >>> html = render_tokens_html(tokens, title="Attention Weights")
+        >>> with open('output.html', 'w') as f:
+        ...     f.write(html)
+    """
+    if dialect not in ["mpnet", "minilm"]:
+        raise ValueError(
+            f"Unsupported dialect: {dialect}. Supported: 'mpnet', 'minilm'"
+        )
+    if not token_scores:
+        raise ValueError("token_scores cannot be empty")
+
+    # Color schemes with good readability
+    color_schemes = {
+        "red": "rgba(220, 53, 69, {alpha})",  # Bootstrap red
+        "blue": "rgba(13, 110, 253, {alpha})",  # Bootstrap blue
+        "green": "rgba(25, 135, 84, {alpha})",  # Bootstrap green
+        "purple": "rgba(111, 66, 193, {alpha})",  # Bootstrap purple
+        "orange": "rgba(253, 126, 20, {alpha})",  # Bootstrap orange
+    }
+
+    if colormap not in color_schemes:
+        raise ValueError(
+            f"Unsupported colormap: {colormap}. Available: {list(color_schemes.keys())}"
+        )
+
+    color_template = color_schemes[colormap]
+
+    # Normalize and process tokens
+    processed_tokens = []
+    scores = []
+
+    for item in token_scores:
+        if isinstance(item, dict):
+            if "token" not in item or "score" not in item:
+                raise ValueError("Dict items must contain 'token' and 'score' keys")
+            token, score = item["token"], item["score"]
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            token, score = item
+        else:
+            raise ValueError(
+                "Each item must be a dict with 'token'/'score' keys or a (token, score) tuple"
+            )
+
+        # Ensure score is in 0-1 range
+        score = max(0.0, min(1.0, float(score)))
+        scores.append(score)
+        processed_tokens.append(str(token))
+
+    # HTML escape function
+    def html_escape(text: str) -> str:
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#x27;")
+        )
+
+    # Generate HTML
+    html_parts = [
+        f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{html_escape(title)}</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }}
+        
+        .container {{
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        h1 {{
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #dee2e6;
+            padding-bottom: 10px;
+        }}
+        
+        .token-container {{
+            font-size: 18px;
+            line-height: 2;
+            word-wrap: break-word;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }}
+        
+        .word-group {{
+            display: inline-block;
+            margin: 1px 6px 1px 0;
+            border-radius: 4px;
+            background: rgba(0,0,0,0.02);
+            padding: 1px;
+        }}
+        
+        .token {{
+            display: inline-block;
+            padding: 2px 3px;
+            margin: 0;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+            cursor: default;
+        }}
+        
+        .token.subword {{
+            margin-left: 0;
+            border-radius: 0;
+        }}
+        
+        .token.first-subword {{
+            border-radius: 0;
+        }}
+        
+        .word-group .token:first-child {{
+            border-radius: 10px 0 0 10px;
+        }}
+
+        .word-group .token:last-child {{
+            border-radius: 0 10px 10px 0;
+        }}
+
+        .word-group .token:first-child:last-child {{
+            border-radius: 10px;
+        }}
+        
+        .token:hover {{
+            border: 1px solid #666;
+            transform: scale(1.05);
+            z-index: 10;
+            position: relative;
+        }}
+        
+        .word-group:hover {{
+            background: rgba(0,0,0,0.05);
+        }}
+        
+        .legend {{
+            margin-top: 30px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid {color_template.format(alpha=1.0)};
+        }}
+        
+        .legend-title {{
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }}
+        
+        .legend-gradient {{
+            height: 20px;
+            background: linear-gradient(to right, 
+                {color_template.format(alpha=0.1)}, 
+                {color_template.format(alpha=1.0)});
+            border-radius: 3px;
+            margin: 10px 0;
+        }}
+        
+        .legend-labels {{
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #666;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{html_escape(title)}</h1>
+        <div class="token-container">"""
+    ]
+
+    min_score = min(scores)
+    max_score = max(scores)
+    # Group tokens by words and add them with proper spacing
+    i = 0
+    while i < len(processed_tokens):
+        # Start a word group
+        html_parts.append('<span class="word-group">')
+
+        # Process tokens in current word
+        word_token_indices = [i]
+
+        # Look ahead for subword tokens (starting with ##)
+        if dialect == "minilm":
+            j = i + 1
+            while j < len(processed_tokens) and processed_tokens[j].startswith("##"):
+                word_token_indices.append(j)
+                j += 1
+        else:  # mpnet or other dialects
+            j = i + 1
+            while j < len(processed_tokens) and not processed_tokens[j].startswith("▁"):
+                word_token_indices.append(j)
+                j += 1
+
+        # Add all tokens in this word group
+        for idx_in_word, token_idx in enumerate(word_token_indices):
+            token = processed_tokens[token_idx]
+            score = scores[token_idx]
+
+            # Remove ## prefix for display
+            if dialect == "minilm":
+                display_token = token[2:] if token.startswith("##") else token
+            else:
+                display_token = token[1:] if token.startswith("▁") else token
+
+            # Calculate alpha based on score (minimum 0.1 for readability, maximum 0.9)
+            alpha = (
+                0.1 + ((score - min_score) / (max_score - min_score)) * 0.8
+                if max_score > min_score
+                else 0.5
+            )
+            background_color = color_template.format(alpha=alpha)
+
+            # Determine text color for readability
+            text_color = "#000" if alpha < 0.5 else "#fff"
+
+            # Create tooltip text
+            tooltip = f"Score: {score:.3f}" if show_scores else f"Token {token_idx+1}"
+            if token.startswith("##"):
+                tooltip += " (subword)"
+
+            # Determine CSS classes
+            css_classes = ["token"]
+            if token.startswith("##"):
+                css_classes.append("subword")
+                if idx_in_word == 1:  # First subword token
+                    css_classes.append("first-subword")
+
+            html_parts.append(
+                f"""<span class="{' '.join(css_classes)}" 
+                      style="background-color: {background_color}; color: {text_color};" 
+                      title="{html_escape(tooltip)}">{html_escape(display_token)}</span>"""
+            )
+
+        # Close word group
+        html_parts.append("</span>")
+
+        # Add space after word group (but not after punctuation)
+        if j < len(processed_tokens):
+            next_token = processed_tokens[j]
+            if next_token not in ".,!?;:)]}":
+                html_parts.append(" ")
+
+        # Move to next word
+        i = j
+
+    # Add legend and closing HTML
+    html_parts.extend(
+        [
+            f"""
+        </div>
+        
+        <div class="legend">
+            <div class="legend-title">Score Intensity Legend</div>
+            <div class="legend-gradient"></div>
+            <div class="legend-labels">
+                <span>Low (0.0)</span>
+                <span>Medium (0.5)</span>
+                <span>High (1.0)</span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                <strong>Note:</strong> Tokens belonging to the same word are grouped together. 
+                Subword tokens (originally prefixed with ##) are displayed without the prefix.
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        ]
+    )
+
+    return "".join(html_parts)
 
 
 # Example usage
@@ -333,8 +710,10 @@ if __name__ == "__main__":
     # Load spaCy model
     nlp = spacy.load("en_core_web_sm")
 
-    # Process sample text
-    text = "Peculiarish sample sentence for testing token embeddings."
+    # Process sample text with multiple sentences
+    text = """Ontologies of Time: Review and Trends.
+    Time, as a phenomenon, has been in the focus of scientific thought from ancient times.
+    It continues to be an important subject of research in many disciplines due to its importance as a basic aspect for understanding and formally representing change."""
     doc = nlp(text)
 
     # Extract embeddings
@@ -343,10 +722,17 @@ if __name__ == "__main__":
     print(f"Token embeddings shape: {result.token_embeddings.shape}")
     print(f"Text embedding shape: {result.text_embedding.shape}")
     print(f"Word to tokens mapping: {len(result.word_to_tokens_mapping)} words")
+    print(f"Token to sentence mapping: {len(result.token_to_sentence_mapping)} tokens")
 
     # Print some mappings
-    for span, token_indices in list(result.word_to_tokens_mapping.items()):
+    print("\n--- Word to Token Mappings ---")
+    for span, token_indices in list(result.word_to_tokens_mapping.items())[:5]:
         print(f"'{span.text}' -> SBERT tokens {token_indices}")
+
+    # Print token to sentence mappings
+    print("\n--- Token to Sentence Mappings ---")
+    for token_idx, sentence_idx in list(result.token_to_sentence_mapping.items())[:10]:
+        print(f"Token {token_idx} -> Sentence {sentence_idx}")
 
     # Demonstrate pooling function usage
     print("\n--- Pooling Function Examples ---")
@@ -395,12 +781,12 @@ if __name__ == "__main__":
         )
         print(f"Masked pooled shape: {masked_pooled.shape}")
 
-    # Example 3: Compare different approaches for getting token embeddings
+    # Example 4: Compare different approaches for getting token embeddings
     print(f"\nToken embeddings extracted using official API:")
     print(f"Shape: {result.token_embeddings.shape}")
     print(f"First token embedding (first 5 dims): {result.token_embeddings[0][:5]}")
 
-    # Example 4: Compare with SBERT's original text embedding
+    # Example 5: Compare with SBERT's original text embedding
     all_token_embeddings = [
         result.token_embeddings[i] for i in range(len(result.token_embeddings))
     ]
@@ -422,3 +808,110 @@ if __name__ == "__main__":
     print("\nCosine similarity between SBERT text embedding and manual mean pooled:")
     print(cos_sim(result.text_embedding, normalized_embeddings).item())
     print(cos_sim(result.text_embedding, manual_mean_pooled).item())
+
+    # # Example 6: HTML visualization with improved word grouping
+    # print("\n--- HTML Visualization Examples ---")
+
+    # Create sample token scores for visualization
+    model = SentenceTransformer(
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    )
+    tokenizer = model.tokenizer
+
+    # Tokenize text to get actual tokens (including subword tokens with ##)
+    tokens = tokenizer.tokenize(text, add_special_tokens=True)
+    print(len(tokens), "tokens extracted from text")
+    print("=========================================")
+
+    # # Generate random scores for demonstration (in practice, these could be attention weights, etc.)
+    # np.random.seed(42)  # For reproducible results
+    # scores = np.random.random(len(tokens))
+
+    # print(f"Sample tokens: {tokens[:10]}")  # Show first 10 tokens to see ## patterns
+
+    # # Create token/score pairs using tuples
+    # token_score_tuples = [(token, score) for token, score in zip(tokens, scores)]
+
+    # # Create HTML visualization with word grouping
+    # html_output = render_tokens_html(
+    #     token_score_tuples,
+    #     title="Token Visualization with Word Grouping",
+    #     colormap="blue",
+    #     show_scores=True,
+    # )
+
+    # # Save to file
+    # with open("token_visualization_grouped.html", "w", encoding="utf-8") as f:
+    #     f.write(html_output)
+    # print(
+    #     "HTML visualization with word grouping saved to 'token_visualization_grouped.html'"
+    # )
+
+    # # Example with dict format and different text that will create more subword tokens
+    # complex_text = (
+    #     "Tokenization and subwordification are important preprocessing steps."
+    # )
+    # complex_tokens = tokenizer.tokenize(complex_text)
+    # complex_scores = np.random.random(len(complex_tokens))
+
+    # token_score_dicts = [
+    #     {"token": token, "score": score}
+    #     for token, score in zip(complex_tokens, complex_scores)
+    # ]
+
+    # html_output_red = render_tokens_html(
+    #     token_score_dicts,
+    #     title="Complex Tokenization - Red Colormap",
+    #     colormap="red",
+    #     show_scores=True,
+    # )
+
+    # with open("token_visualization_complex.html", "w", encoding="utf-8") as f:
+    #     f.write(html_output_red)
+    # print(
+    #     "Complex tokenization visualization saved to 'token_visualization_complex.html'"
+    # )
+
+    # Example with actual embedding similarities as scores
+    # Calculate similarity of each token embedding to the mean embedding
+
+    similarity_scores = []
+
+    for token_emb in result.token_embeddings:
+        # Calculate cosine similarity
+        similarity = cos_sim(token_emb, normalized_embeddings).item()
+        # Normalize to 0-1 range
+        similarity_normalized = (similarity + 1) / 2
+        similarity_scores.append(similarity_normalized)
+
+    # print(result.token_embeddings.shape)
+    # print(len(tokens), len(similarity_scores))
+    # print("=========================================")
+    # print(f"Sample similarity scores: {similarity_scores[:10]}")
+    # print("=========================================")
+    # Create visualization with actual embedding similarities
+    embedding_token_scores = [
+        (tokens[i] if i < len(tokens) else f"token_{i}", similarity_scores[i])
+        for i in range(len(similarity_scores))
+    ]
+
+    html_embedding_viz = render_tokens_html(
+        embedding_token_scores,
+        title="Token Embedding Similarity to Mean (Grouped by Words)",
+        colormap="green",
+        show_scores=True,
+    )
+
+    with open("embedding_similarity_grouped.html", "w", encoding="utf-8") as f:
+        f.write(html_embedding_viz)
+    print(
+        "Embedding similarity visualization saved to 'embedding_similarity_grouped.html'"
+    )
+
+    print(f"\nGenerated {len(embedding_token_scores)} token visualizations")
+    print("Features:")
+    print("  - Subword tokens (##) are grouped with their parent words")
+    print("  - ## prefix is removed for cleaner display")
+    print("  - Word groups have subtle background highlighting")
+    print("  - Hover effects highlight entire word groups")
+    print("Open the HTML files in a web browser to view the improved visualizations!")

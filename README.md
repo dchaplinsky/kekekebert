@@ -1,4 +1,4 @@
-# Experiments on keybert-like automatic term extraction.
+# Experiments on keybert-like automatic term extraction and visualisation.
 
 ## Install
 ```shell
