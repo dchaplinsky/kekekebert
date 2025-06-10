@@ -16,6 +16,11 @@ import numpy as np
 import spacy
 from sentence_transformers import SentenceTransformer
 from spacy.tokens import Doc, Span
+import jinja2
+
+# Load Jinja2 template
+template_loader = jinja2.FileSystemLoader("templates")
+template_env = jinja2.Environment(loader=template_loader)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,40 @@ class TokenEmbeddingsResult:
     text_embedding: np.ndarray
     tokens_ids: List[int]
     tokens: List[str]
+
+
+@dataclass
+class TokenScoreReport:
+    """Container for token for report.
+
+    Attributes:
+        token: The token string
+        background_color: CSS color for the token background
+        text_color: CSS color for the token text
+        tooltip: Tooltip text to show on hover
+        css_classes: Additional CSS classes for styling
+    """
+
+    token: str
+    background_color: str
+    text_color: str
+    tooltip: str
+    css_classes: str
+
+
+@dataclass
+class ScoreReport:
+    """Container for score report.
+
+    Attributes:
+        grouped_tokens: List of lists of TokenScoreReport objects, each representing a group of tokens
+        min_score: Minimum score across all tokens in the report
+        max_score: Maximum score across all tokens in the report
+    """
+
+    grouped_tokens: List[List[TokenScoreReport] | str]  # List of token groups or strings (for spaces)
+    min_score: float
+    max_score: float
 
 
 def pool_embeddings(
@@ -389,7 +428,7 @@ def _create_token_to_sentence_mapping(
 
 
 def render_tokens_html(
-    token_scores: List[Union[Dict[str, Union[str, float]], Tuple[str, float]]],
+    score_groups: List[List[Union[Dict[str, Union[str, float]], Tuple[str, float]]]],
     title: str = "Token Visualization",
     colormap: str = "red",
     show_scores: bool = True,
@@ -402,7 +441,7 @@ def render_tokens_html(
     are grouped closer together, and subword tokens (##) are displayed without the prefix.
 
     Args:
-        token_scores: List of token/score pairs. Each item can be:
+        score_groups: List of lists of token/score pairs. Each item can be:
             - Dict with 'token' and 'score' keys: {'token': 'hello', 'score': 0.8}
             - Tuple: ('hello', 0.8)
         title: HTML page title
@@ -419,7 +458,7 @@ def render_tokens_html(
 
     Examples:
         >>> tokens = [('Hello', 0.8), ('##world', 0.3), ('!', 0.1)]
-        >>> html = render_tokens_html(tokens, title="Attention Weights")
+        >>> html = render_tokens_html([tokens], title="Attention Weights")
         >>> with open('output.html', 'w') as f:
         ...     f.write(html)
     """
@@ -427,8 +466,8 @@ def render_tokens_html(
         raise ValueError(
             f"Unsupported dialect: {dialect}. Supported: 'mpnet', 'minilm'"
         )
-    if not token_scores:
-        raise ValueError("token_scores cannot be empty")
+    if not score_groups or not all(score_groups):
+        raise ValueError("score_groups must be a non-empty list of token/score pairs")
 
     # Color schemes with good readability
     color_schemes = {
@@ -445,265 +484,129 @@ def render_tokens_html(
         )
 
     color_template = color_schemes[colormap]
+    template = template_env.get_template("report.jinja")
+    score_reports = []
 
-    # Normalize and process tokens
-    processed_tokens = []
-    scores = []
+    for token_scores in score_groups:
+        score_report = ScoreReport(grouped_tokens=[], min_score=0, max_score=1.0)
+        # Normalize and process tokens
+        processed_tokens = []
+        scores = []
 
-    for item in token_scores:
-        if isinstance(item, dict):
-            if "token" not in item or "score" not in item:
-                raise ValueError("Dict items must contain 'token' and 'score' keys")
-            token, score = item["token"], item["score"]
-        elif isinstance(item, (tuple, list)) and len(item) == 2:
-            token, score = item
-        else:
-            raise ValueError(
-                "Each item must be a dict with 'token'/'score' keys or a (token, score) tuple"
-            )
-
-        # Ensure score is in 0-1 range
-        score = max(0.0, min(1.0, float(score)))
-        scores.append(score)
-        processed_tokens.append(str(token))
-
-    # HTML escape function
-    def html_escape(text: str) -> str:
-        return (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#x27;")
-        )
-
-    # Generate HTML
-    html_parts = [
-        f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{html_escape(title)}</title>
-    <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            line-height: 1.6;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f8f9fa;
-        }}
-        
-        .container {{
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        
-        h1 {{
-            color: #333;
-            text-align: center;
-            margin-bottom: 30px;
-            border-bottom: 2px solid #dee2e6;
-            padding-bottom: 10px;
-        }}
-        
-        .token-container {{
-            font-size: 18px;
-            line-height: 2;
-            word-wrap: break-word;
-            font-family: 'Consolas', 'Monaco', monospace;
-        }}
-        
-        .word-group {{
-            display: inline-block;
-            margin: 1px 6px 1px 0;
-            border-radius: 4px;
-            background: rgba(0,0,0,0.02);
-            padding: 1px;
-        }}
-        
-        .token {{
-            display: inline-block;
-            padding: 2px 3px;
-            margin: 0;
-            border: 1px solid transparent;
-            transition: all 0.2s ease;
-            cursor: default;
-        }}
-        
-        .token.subword {{
-            margin-left: 0;
-            border-radius: 0;
-        }}
-        
-        .token.first-subword {{
-            border-radius: 0;
-        }}
-        
-        .word-group .token:first-child {{
-            border-radius: 10px 0 0 10px;
-        }}
-
-        .word-group .token:last-child {{
-            border-radius: 0 10px 10px 0;
-        }}
-
-        .word-group .token:first-child:last-child {{
-            border-radius: 10px;
-        }}
-        
-        .token:hover {{
-            border: 1px solid #666;
-            transform: scale(1.05);
-            z-index: 10;
-            position: relative;
-        }}
-        
-        .word-group:hover {{
-            background: rgba(0,0,0,0.05);
-        }}
-        
-        .legend {{
-            margin-top: 30px;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 5px;
-            border-left: 4px solid {color_template.format(alpha=1.0)};
-        }}
-        
-        .legend-title {{
-            font-weight: bold;
-            margin-bottom: 10px;
-            color: #333;
-        }}
-        
-        .legend-gradient {{
-            height: 20px;
-            background: linear-gradient(to right, 
-                {color_template.format(alpha=0.1)}, 
-                {color_template.format(alpha=1.0)});
-            border-radius: 3px;
-            margin: 10px 0;
-        }}
-        
-        .legend-labels {{
-            display: flex;
-            justify-content: space-between;
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>{html_escape(title)}</h1>
-        <div class="token-container">"""
-    ]
-
-    min_score = min(scores)
-    max_score = max(scores)
-    # Group tokens by words and add them with proper spacing
-    i = 0
-    while i < len(processed_tokens):
-        # Start a word group
-        html_parts.append('<span class="word-group">')
-
-        # Process tokens in current word
-        word_token_indices = [i]
-
-        # Look ahead for subword tokens (starting with ##)
-        if dialect == "minilm":
-            j = i + 1
-            while j < len(processed_tokens) and processed_tokens[j].startswith("##"):
-                word_token_indices.append(j)
-                j += 1
-        else:  # mpnet or other dialects
-            j = i + 1
-            while j < len(processed_tokens) and not processed_tokens[j].startswith("▁"):
-                word_token_indices.append(j)
-                j += 1
-
-        # Add all tokens in this word group
-        for idx_in_word, token_idx in enumerate(word_token_indices):
-            token = processed_tokens[token_idx]
-            score = scores[token_idx]
-
-            # Remove ## prefix for display
-            if dialect == "minilm":
-                display_token = token[2:] if token.startswith("##") else token
+        for item in token_scores:
+            if isinstance(item, dict):
+                if "token" not in item or "score" not in item:
+                    raise ValueError("Dict items must contain 'token' and 'score' keys")
+                token, score = item["token"], item["score"]
+            elif isinstance(item, (tuple, list)) and len(item) == 2:
+                token, score = item
             else:
-                display_token = token[1:] if token.startswith("▁") else token
+                raise ValueError(
+                    "Each item must be a dict with 'token'/'score' keys or a (token, score) tuple"
+                )
 
-            # Calculate alpha based on score (minimum 0.1 for readability, maximum 0.9)
-            alpha = (
-                0.1 + ((score - min_score) / (max_score - min_score)) * 0.8
-                if max_score > min_score
-                else 0.5
-            )
-            background_color = color_template.format(alpha=alpha)
+            # Ensure score is in 0-1 range
+            score = max(0.0, min(1.0, float(score)))
+            scores.append(score)
+            processed_tokens.append(str(token))
 
-            # Determine text color for readability
-            text_color = "#000" if alpha < 0.5 else "#fff"
+        # Generate HTML
+        min_score = min(scores)
+        max_score = max(scores)
+        score_report.min_score = min_score
+        score_report.max_score = max_score
 
-            # Create tooltip text
-            tooltip = f"Score: {score:.3f}" if show_scores else f"Token {token_idx+1}"
-            if token.startswith("##"):
-                tooltip += " (subword)"
+        # Group tokens by words and add them with proper spacing
+        i = 0
+        while i < len(processed_tokens):
+            # Start a word group
+            current_group = []
 
-            # Determine CSS classes
-            css_classes = ["token"]
-            if token.startswith("##"):
-                css_classes.append("subword")
-                if idx_in_word == 1:  # First subword token
-                    css_classes.append("first-subword")
+            # Process tokens in current word
+            word_token_indices = [i]
 
-            html_parts.append(
-                f"""<span class="{' '.join(css_classes)}" 
-                      style="background-color: {background_color}; color: {text_color};" 
-                      title="{html_escape(tooltip)}">{html_escape(display_token)}</span>"""
-            )
+            # Look ahead for subword tokens (starting with ##)
+            if dialect == "minilm":
+                j = i + 1
+                while j < len(processed_tokens) and processed_tokens[j].startswith(
+                    "##"
+                ):
+                    word_token_indices.append(j)
+                    j += 1
+            else:  # mpnet or other dialects
+                j = i + 1
+                while j < len(processed_tokens) and not processed_tokens[j].startswith(
+                    "▁"
+                ):
+                    word_token_indices.append(j)
+                    j += 1
 
-        # Close word group
-        html_parts.append("</span>")
+            # Add all tokens in this word group
+            for idx_in_word, token_idx in enumerate(word_token_indices):
+                token = processed_tokens[token_idx]
+                score = scores[token_idx]
 
-        # Add space after word group (but not after punctuation)
-        if j < len(processed_tokens):
-            next_token = processed_tokens[j]
-            if next_token not in ".,!?;:)]}":
-                html_parts.append(" ")
+                # Remove ## prefix for display
+                if dialect == "minilm":
+                    display_token = token[2:] if token.startswith("##") else token
+                else:
+                    display_token = token[1:] if token.startswith("▁") else token
 
-        # Move to next word
-        i = j
+                # Calculate alpha based on score (minimum 0.1 for readability, maximum 0.9)
+                alpha = (
+                    0.1 + ((score - min_score) / (max_score - min_score)) * 0.8
+                    if max_score > min_score
+                    else 0.5
+                )
+                background_color = color_template.format(alpha=alpha)
 
+                # Determine text color for readability
+                text_color = "#000" if alpha < 0.5 else "#fff"
+
+                # Create tooltip text
+                tooltip = (
+                    f"Score: {score:.3f}" if show_scores else f"Token {token_idx+1}"
+                )
+
+                # Determine CSS classes
+                css_classes = ["token"]
+                if token.startswith("##"):
+                    css_classes.append("subword")
+                    if idx_in_word == 1:  # First subword token
+                        css_classes.append("first-subword")
+
+                current_group.append(
+                    TokenScoreReport(
+                        token=display_token,
+                        background_color=background_color,
+                        text_color=text_color,
+                        tooltip=tooltip,
+                        css_classes=" ".join(css_classes),
+                    )
+                )
+
+            # Close word group
+            score_report.grouped_tokens.append(current_group)
+
+            # Add space after word group (but not after punctuation)
+            if j < len(processed_tokens):
+                next_token = processed_tokens[j]
+                if next_token not in ".,!?;:)]}":
+                    score_report.grouped_tokens.append(" ")
+
+            # Move to next word
+            i = j
+
+        score_reports.append(score_report)
     # Add legend and closing HTML
-    html_parts.extend(
-        [
-            f"""
-        </div>
-        
-        <div class="legend">
-            <div class="legend-title">Score Intensity Legend</div>
-            <div class="legend-gradient"></div>
-            <div class="legend-labels">
-                <span>Low ({round(min_score, 3)})</span>
-                <span>Medium ({round((max_score + min_score) / 2, 3)})</span>
-                <span>High ({round(max_score, 3)})</span>
-            </div>
-            <div style="margin-top: 10px; font-size: 12px; color: #666;">
-                <strong>Note:</strong> Tokens belonging to the same word are grouped together. 
-                Subword tokens (originally prefixed with ##) are displayed without the prefix.
-            </div>
-        </div>
-    </div>
-</body>
-</html>"""
-        ]
-    )
 
-    return "".join(html_parts)
+    return template.render(
+        title=title,
+        score_reports=score_reports,
+        color_template=color_template,
+        show_scores=show_scores,
+        dialect=dialect,
+    )
 
 
 # Example usage
@@ -741,7 +644,7 @@ if __name__ == "__main__":
     ]
 
     html_embedding_viz = render_tokens_html(
-        embedding_token_scores,
+        [embedding_token_scores],
         title="Token Embedding Similarity to Mean (Grouped by Words)",
         colormap="red",
         show_scores=True,

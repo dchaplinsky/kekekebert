@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #dee2e6;
+            padding-bottom: 10px;
+        }
+
+        .token-container {
+            font-size: 18px;
+            line-height: 2;
+            word-wrap: break-word;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+
+        .word-group {
+            display: inline-block;
+            margin: 1px 6px 1px 0;
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.02);
+            padding: 1px;
+        }
+
+        .token {
+            display: inline-block;
+            padding: 2px 3px;
+            margin: 0;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+            cursor: default;
+        }
+
+        .token.subword {
+            margin-left: 0;
+            border-radius: 0;
+        }
+
+        .token.first-subword {
+            border-radius: 0;
+        }
+
+        .word-group .token:first-child {
+                border-radius: 10px 0 0 10px;
+        }
+
+        .word-group .token:last-child {
+            border-radius: 0 10px 10px 0;
+        }
+
+        .word-group .token:first-child:last-child {
+            border-radius: 10px;
+        }
+
+        .token:hover {
+            border: 1px solid #666;
+            transform: scale(1.05);
+            z-index: 10;
+            position: relative;
+        }
+
+        .word-group:hover {
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        .legend {
+            margin-top: 30px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+
+            border-left: 4px solid {{
+                color_template.format(alpha=1.0)
+            }};
+        }
+
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .legend-gradient {
+            height: 20px;
+
+            background: linear-gradient(to right, {{ color_template.format(alpha=0.1) }}, {{ color_template.format(alpha=1.0) }});
+            border-radius: 3px;
+            margin: 10px 0;
+        }
+
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+
+<body>
+    {% for score_report in score_reports %}
+    <div class="container">
+        <h1>{{ score_report.title }}</h1>
+        <div class="token-container">
+            {%- for word in score_report.grouped_tokens -%}
+            <span class="word-group">{% if word is string %}<span>{{ word }}</span>
+                {% else%}
+                {% for token in word %}<span class="{{ token.css_classes }}" style="background-color: {{ token.background_color }}; color: {{ token.text_color }};"
+                    title="{{ token.tooltip }}">{{ token.token }}</span>{% endfor %}
+            {% endif %}</span>
+            {%- endfor -%}
+        </div>
+        
+        <div class="legend">
+            <div class="legend-title">Score Intensity Legend</div>
+            <div class="legend-gradient"></div>
+            <div class="legend-labels">
+                <span>Low ({{ score_report.min_score|round(3) }})</span>
+                <span>Medium ({{ ((score_report.max_score + score_report.min_score) / 2) |round(3) }})</span>
+                <span>High ({{ score_report.max_score|round(3) }})</span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                <strong>Note:</strong> Tokens belonging to the same word are grouped together.
+                Subword tokens (originally prefixed with ## or ▁) are displayed without the prefix.
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</body>
+        
+</html>
