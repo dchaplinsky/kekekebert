@@ -29,13 +29,16 @@ class TokenEmbeddingsResult:
         word_to_tokens_mapping: Dictionary mapping spaCy spans to lists of SBERT token indices
         token_to_sentence_mapping: Dictionary mapping SBERT token indices to spaCy sentence indices
         text_embedding: Full text embedding as numpy array of shape (embedding_dim,)
+        tokens_ids: List of SBERT token IDs corresponding to the input text
+        tokens: List of SBERT tokens corresponding to the input text, including subwords
     """
 
     token_embeddings: np.ndarray
     word_to_tokens_mapping: Dict[Span, List[int]]
     token_to_sentence_mapping: Dict[int, int]
     text_embedding: np.ndarray
-    tokens: List[int]
+    tokens_ids: List[int]
+    tokens: List[str]
 
 
 def pool_embeddings(
@@ -75,7 +78,6 @@ def pool_embeddings(
     try:
         embeddings_array = np.array(embeddings)
     except Exception as e:
-        print(embeddings)
         raise
 
     # Validate dimensions
@@ -274,14 +276,15 @@ def extract_token_embeddings(
         f"embedding dimension: {token_embeddings.shape[1]}"
     )
 
-    print(encoded["input_ids"].squeeze(0).tolist())
-
     return TokenEmbeddingsResult(
         token_embeddings=token_embeddings,
         word_to_tokens_mapping=word_to_tokens_mapping,
         token_to_sentence_mapping=token_to_sentence_mapping,
         text_embedding=text_embedding,
-        tokens=encoded["input_ids"].squeeze(0).tolist()
+        tokens_ids=encoded["input_ids"].squeeze(0).tolist(),
+        tokens=tokenizer.convert_ids_to_tokens(
+            encoded["input_ids"].squeeze(0).tolist()
+        ),
     )
 
 
@@ -685,9 +688,9 @@ def render_tokens_html(
             <div class="legend-title">Score Intensity Legend</div>
             <div class="legend-gradient"></div>
             <div class="legend-labels">
-                <span>Low (0.0)</span>
-                <span>Medium (0.5)</span>
-                <span>High (1.0)</span>
+                <span>Low ({round(min_score, 3)})</span>
+                <span>Medium ({round((max_score + min_score) / 2, 3)})</span>
+                <span>High ({round(max_score, 3)})</span>
             </div>
             <div style="margin-top: 10px; font-size: 12px; color: #666;">
                 <strong>Note:</strong> Tokens belonging to the same word are grouped together. 
@@ -717,201 +720,38 @@ if __name__ == "__main__":
     doc = nlp(text)
 
     # Extract embeddings
-    result = extract_token_embeddings(doc)
-
-    print(f"Token embeddings shape: {result.token_embeddings.shape}")
-    print(f"Text embedding shape: {result.text_embedding.shape}")
-    print(f"Word to tokens mapping: {len(result.word_to_tokens_mapping)} words")
-    print(f"Token to sentence mapping: {len(result.token_to_sentence_mapping)} tokens")
-
-    # Print some mappings
-    print("\n--- Word to Token Mappings ---")
-    for span, token_indices in list(result.word_to_tokens_mapping.items())[:5]:
-        print(f"'{span.text}' -> SBERT tokens {token_indices}")
-
-    # Print token to sentence mappings
-    print("\n--- Token to Sentence Mappings ---")
-    for token_idx, sentence_idx in list(result.token_to_sentence_mapping.items())[:10]:
-        print(f"Token {token_idx} -> Sentence {sentence_idx}")
-
-    # Demonstrate pooling function usage
-    print("\n--- Pooling Function Examples ---")
-
-    # Example 1: Get word-level embeddings using the helper function
-    word_embeddings_dict = get_word_embeddings(result, "mean")
-    print(f"Generated word embeddings for {len(word_embeddings_dict)} words")
-
-    for span, embedding in list(word_embeddings_dict.items())[:3]:
-        print(f"Word '{span.text}' embedding shape: {embedding.shape}")
-
-    # Example 2: Manual pooling of specific words
-    word_embeddings = []
-    word_names = []
-    for span, token_indices in list(result.word_to_tokens_mapping.items())[:3]:
-        # Get embeddings for tokens that make up this word
-        span_token_embeddings = [result.token_embeddings[i] for i in token_indices]
-        # Pool them to get a single word embedding
-        word_embedding = pool_embeddings(span_token_embeddings, "mean")
-        word_embeddings.append(word_embedding)
-        word_names.append(span.text)
-
-    # Example 3: Pool word embeddings using different strategies
-    if len(word_embeddings) >= 2:
-        print(f"\nPooling {len(word_embeddings)} word embeddings ({word_names}):")
-
-        # Mean pooling
-        mean_pooled = pool_embeddings(word_embeddings, "mean")
-        print(f"Mean pooled shape: {mean_pooled.shape}")
-
-        # Max pooling
-        max_pooled = pool_embeddings(word_embeddings, "max")
-        print(f"Max pooled shape: {max_pooled.shape}")
-
-        # Weighted mean pooling (give more weight to first word)
-        weights = [0.5, 0.3, 0.2][: len(word_embeddings)]
-        weighted_pooled = pool_embeddings(
-            word_embeddings, "weighted_mean", weights=weights
-        )
-        print(f"Weighted mean pooled shape: {weighted_pooled.shape}")
-
-        # With attention mask (exclude last word)
-        attention_mask = [True] * (len(word_embeddings) - 1) + [False]
-        masked_pooled = pool_embeddings(
-            word_embeddings, "mean", attention_mask=attention_mask
-        )
-        print(f"Masked pooled shape: {masked_pooled.shape}")
-
-    # Example 4: Compare different approaches for getting token embeddings
-    print(f"\nToken embeddings extracted using official API:")
-    print(f"Shape: {result.token_embeddings.shape}")
-    print(f"First token embedding (first 5 dims): {result.token_embeddings[0][:5]}")
-
-    # Example 5: Compare with SBERT's original text embedding
-    all_token_embeddings = [
-        result.token_embeddings[i] for i in range(len(result.token_embeddings))
-    ]
-    manual_mean_pooled = pool_embeddings(all_token_embeddings, "mean")
-
-    print(result.text_embedding[:10])
-    print(manual_mean_pooled[:10])
-
-    normalized_embeddings = manual_mean_pooled / np.linalg.norm(manual_mean_pooled)
-    print(normalized_embeddings[:10])
-
-    print(f"\nComparison with SBERT text embedding:")
-    print(f"SBERT text embedding shape: {result.text_embedding.shape}")
-    print(f"Manual mean pooled shape: {manual_mean_pooled.shape}")
-    print(
-        f"Embeddings are similar: {np.allclose(result.text_embedding, normalized_embeddings, atol=1e-3)}"
-    )
-
-    print("\nCosine similarity between SBERT text embedding and manual mean pooled:")
-    print(cos_sim(result.text_embedding, normalized_embeddings).item())
-    print(cos_sim(result.text_embedding, manual_mean_pooled).item())
-
-    # # Example 6: HTML visualization with improved word grouping
-    # print("\n--- HTML Visualization Examples ---")
-
-    # Create sample token scores for visualization
-    model = SentenceTransformer(
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
-    tokenizer = model.tokenizer
-
-    # Tokenize text to get actual tokens (including subword tokens with ##)
-    tokens = tokenizer.tokenize(text, add_special_tokens=True)
-    print(len(tokens), "tokens extracted from text")
-    print("=========================================")
-
-    # # Generate random scores for demonstration (in practice, these could be attention weights, etc.)
-    # np.random.seed(42)  # For reproducible results
-    # scores = np.random.random(len(tokens))
-
-    # print(f"Sample tokens: {tokens[:10]}")  # Show first 10 tokens to see ## patterns
-
-    # # Create token/score pairs using tuples
-    # token_score_tuples = [(token, score) for token, score in zip(tokens, scores)]
-
-    # # Create HTML visualization with word grouping
-    # html_output = render_tokens_html(
-    #     token_score_tuples,
-    #     title="Token Visualization with Word Grouping",
-    #     colormap="blue",
-    #     show_scores=True,
-    # )
-
-    # # Save to file
-    # with open("token_visualization_grouped.html", "w", encoding="utf-8") as f:
-    #     f.write(html_output)
-    # print(
-    #     "HTML visualization with word grouping saved to 'token_visualization_grouped.html'"
-    # )
-
-    # # Example with dict format and different text that will create more subword tokens
-    # complex_text = (
-    #     "Tokenization and subwordification are important preprocessing steps."
-    # )
-    # complex_tokens = tokenizer.tokenize(complex_text)
-    # complex_scores = np.random.random(len(complex_tokens))
-
-    # token_score_dicts = [
-    #     {"token": token, "score": score}
-    #     for token, score in zip(complex_tokens, complex_scores)
-    # ]
-
-    # html_output_red = render_tokens_html(
-    #     token_score_dicts,
-    #     title="Complex Tokenization - Red Colormap",
-    #     colormap="red",
-    #     show_scores=True,
-    # )
-
-    # with open("token_visualization_complex.html", "w", encoding="utf-8") as f:
-    #     f.write(html_output_red)
-    # print(
-    #     "Complex tokenization visualization saved to 'token_visualization_complex.html'"
-    # )
-
-    # Example with actual embedding similarities as scores
-    # Calculate similarity of each token embedding to the mean embedding
+    # result = extract_token_embeddings(doc, model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+    result = extract_token_embeddings(doc, model_name="all-MiniLM-L6-v2")
 
     similarity_scores = []
 
     for token_emb in result.token_embeddings:
         # Calculate cosine similarity
-        similarity = cos_sim(token_emb, normalized_embeddings).item()
-        # Normalize to 0-1 range
-        similarity_normalized = (similarity + 1) / 2
-        similarity_scores.append(similarity_normalized)
+        similarity = cos_sim(token_emb, result.text_embedding).item()
+        # # Normalize to 0-1 range
+        # similarity_normalized = (similarity + 1) / 2
+        similarity_scores.append(similarity)
 
-    # print(result.token_embeddings.shape)
-    # print(len(tokens), len(similarity_scores))
-    # print("=========================================")
-    # print(f"Sample similarity scores: {similarity_scores[:10]}")
-    # print("=========================================")
-    # Create visualization with actual embedding similarities
     embedding_token_scores = [
-        (tokens[i] if i < len(tokens) else f"token_{i}", similarity_scores[i])
+        (
+            result.tokens[i] if i < len(result.tokens) else f"token_{i}",
+            similarity_scores[i],
+        )
         for i in range(len(similarity_scores))
     ]
 
     html_embedding_viz = render_tokens_html(
         embedding_token_scores,
         title="Token Embedding Similarity to Mean (Grouped by Words)",
-        colormap="green",
+        colormap="red",
         show_scores=True,
+        dialect="minilm",  # Use 'minilm' for better subword handling
     )
 
-    with open("embedding_similarity_grouped.html", "w", encoding="utf-8") as f:
+    with open(
+        "html_results/embedding_similarity_grouped.html", "w", encoding="utf-8"
+    ) as f:
         f.write(html_embedding_viz)
     print(
-        "Embedding similarity visualization saved to 'embedding_similarity_grouped.html'"
+        "Embedding similarity visualization saved to 'html_results/embedding_similarity_grouped.html'"
     )
-
-    print(f"\nGenerated {len(embedding_token_scores)} token visualizations")
-    print("Features:")
-    print("  - Subword tokens (##) are grouped with their parent words")
-    print("  - ## prefix is removed for cleaner display")
-    print("  - Word groups have subtle background highlighting")
-    print("  - Hover effects highlight entire word groups")
-    print("Open the HTML files in a web browser to view the improved visualizations!")
